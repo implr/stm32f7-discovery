@@ -154,7 +154,7 @@ pub struct RxToken<'a> {
 impl<'a> ::smoltcp::phy::RxToken for RxToken<'a> {
     fn consume<R, F>(self, _timestamp: Instant, f: F) -> ::smoltcp::Result<R>
     where
-        F: FnOnce(&[u8]) -> ::smoltcp::Result<R>,
+        F: FnOnce(&mut [u8]) -> ::smoltcp::Result<R>,
     {
         self.rx.receive(f).map_err(|err| match err {
             ReceiveError::Processing(e) => e,
@@ -270,7 +270,7 @@ impl RxDevice {
 
     fn receive<T, F>(&mut self, f: F) -> Result<T, ReceiveError>
     where
-        F: FnOnce(&[u8]) -> ::smoltcp::Result<T>,
+        F: FnOnce(&mut [u8]) -> ::smoltcp::Result<T>,
     {
         let descriptor_index = self.next_descriptor;
         let descriptor = self.descriptors[descriptor_index].read();
@@ -333,8 +333,8 @@ impl RxDevice {
                 // read data and pass it to processing function
                 let offset = self.config.descriptor_buffer_offset(descriptor_index);
                 let len = last_descriptor.frame_len();
-                let data = &self.buffer[offset..(offset + len)];
-                f(data).map_err(ReceiveError::Processing)
+                let mut data = &mut self.buffer[offset..(offset + len)];
+                f(&mut data).map_err(ReceiveError::Processing)
             }
         };
 

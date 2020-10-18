@@ -271,26 +271,27 @@ fn run() -> ! {
             let audio_task = AudioTask::new(layer_1_mutex.clone(), sai_2, idle_stream.clone());
 
             let mut executor = task_runtime::Executor::new();
-            executor.spawn_local(button_task(button_stream)).unwrap();
-            executor.spawn_local(tim6_task(tim6_stream)).unwrap();
-            executor.spawn_local(touch_task.run()).unwrap();
-            executor
+            let mut spawner = executor.spawner();
+            spawner.spawn_local(button_task(button_stream)).unwrap();
+            spawner.spawn_local(tim6_task(tim6_stream)).unwrap();
+            spawner.spawn_local(touch_task.run()).unwrap();
+            spawner
                 .spawn_local(count_up_on_idle_task(idle_stream.clone()))
                 .unwrap();
-            executor.spawn_local(audio_task.run()).unwrap();
+            spawner.spawn_local(audio_task.run()).unwrap();
 
             //executor.spawn_local(print_x);
 
             // FIXME: Causes link error: no memory region specified for section '.ARM.extab'
             // see https://github.com/rust-embedded/cortex-m-rt/issues/157
-            executor.spawn_local(ethernet_task.run()).unwrap();
+            spawner.spawn_local(ethernet_task.run()).unwrap();
 
             // FIXME: Does not work currently due to borrowing errors
             // executor.spawn_local(sd_card_task(sd, idle_stream.clone())).unwrap();
 
             let idle = async move {
                 loop {
-                    let next_waker = await!(idle_waker_stream.next()).expect("idle channel closed");
+                    let next_waker = (idle_waker_stream.next()).await.expect("idle channel closed");
                     next_waker.wake();
                 }
             };
@@ -310,7 +311,7 @@ fn run() -> ! {
 async fn button_task(button_stream: impl Stream<Item = ()>) {
     pin_mut!(button_stream);
     for i in 1usize.. {
-        let next = await!(button_stream.next());
+        let next = (button_stream.next()).await;
         assert!(next.is_some(), "button channel closed");
         print!("{}", i);
     }
@@ -319,7 +320,7 @@ async fn button_task(button_stream: impl Stream<Item = ()>) {
 async fn tim6_task(tim6_stream: impl Stream<Item = ()>) {
     pin_mut!(tim6_stream);
     loop {
-        let next = await!(tim6_stream.next());
+        let next = (tim6_stream.next()).await;
         assert!(next.is_some(), "tim6 channel closed");
         print!("y");
     }
@@ -347,17 +348,17 @@ where
             layer_mutex,
         } = self;
         pin_mut!(touch_int_stream);
-        await!(layer_mutex.with(|l| l.clear()));
+        (layer_mutex.with(|l| l.clear())).await;
         loop {
-            await!(touch_int_stream.next()).expect("touch channel closed");
-            let touches = await!(i2c_3_mutex.with(|i2c_3| touch::touches(i2c_3))).unwrap();
-            await!(layer_mutex.with(|layer| for touch in touches {
+            (touch_int_stream.next()).await.expect("touch channel closed");
+            let touches = (i2c_3_mutex.with(|i2c_3| touch::touches(i2c_3))).await.unwrap();
+            (layer_mutex.with(|layer| for touch in touches {
                 layer.print_point_color_at(
                     touch.x as usize,
                     touch.y as usize,
                     Color::from_hex(0xffff00),
                 );
-            }))
+            })).await
         }
     }
 }
@@ -399,7 +400,7 @@ where
         let mut data0_buffer = None;
         loop {
             // FIXME: replace with actual interrupt stream when we get audio interrupts working
-            await!(idle_stream.next());
+            (idle_stream.next()).await;
 
             // poll for new audio data
             if sai_2.bsr.read().freq().bit_is_set() {
@@ -411,7 +412,7 @@ where
                     }
                     Some(data0) => {
                         let data1 = data;
-                        await!(layer_mutex.with(|l| audio_writer.set_next_col(l, data0, data1)));
+                        (layer_mutex.with(|l| audio_writer.set_next_col(l, data0, data1))).await;
                         data0_buffer = None;
                     }
                 }
@@ -424,7 +425,7 @@ async fn count_up_on_idle_task(idle_stream: impl Stream<Item = ()>) {
     pin_mut!(idle_stream);
     let mut number = 0;
     loop {
-        await!(idle_stream.next()).expect("idle stream closed");
+        (idle_stream.next()).await.expect("idle stream closed");
         number += 1;
         if number % 100000 == 0 {
             print!(" idle({}) ", number);
@@ -440,7 +441,7 @@ where
     pin_mut!(idle_stream);
     // Initialize the SD Card on insert and deinitialize on extract.
     loop {
-        await!(idle_stream.next());
+        (idle_stream.next()).await;
         if sd.card_present() && !sd.card_initialized() {
             if let Some(i_err) = sd::init(&mut sd).err() {
                 println!("{:?}", i_err);
@@ -522,7 +523,7 @@ where
 
         // handle new ethernet packets
         loop {
-            await!(idle_stream.next());
+            (idle_stream.next()).await;
             let timestamp = Instant::from_millis(system_clock::ms() as i64);
             match iface.poll(&mut sockets, timestamp) {
                 Err(::smoltcp::Error::Exhausted) => {

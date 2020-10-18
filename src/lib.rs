@@ -15,8 +15,6 @@
 #![feature(drain_filter)]
 #![feature(never_type)]
 #![feature(generators)]
-#![feature(async_await)]
-#![feature(const_transmute)]
 #![feature(alloc_prelude)]
 #![warn(missing_docs)]
 

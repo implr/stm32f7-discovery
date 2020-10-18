@@ -21,6 +21,7 @@
 #![deny(clippy::all)]
 #![feature(alloc_prelude)]
 #![feature(optin_builtin_traits)]
+#![feature(negative_impls)]
 
 extern crate alloc;
 

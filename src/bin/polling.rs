@@ -10,6 +10,7 @@ extern crate stm32f7;
 extern crate stm32f7_discovery;
 
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use alloc_cortex_m::CortexMHeap;
 use core::alloc::Layout as AllocLayout;
 use core::fmt::Write;
@@ -17,6 +18,11 @@ use core::panic::PanicInfo;
 use cortex_m::{asm, interrupt, peripheral::NVIC};
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use cortex_m_semihosting::hio::{self, HStdout};
+use cortex_m_log::log::{Logger, init};
+use log::info;
+use cortex_m_log::printer::semihosting;
+use cortex_m_log::modes::InterruptOk;
+
 use smoltcp::{
     dhcp::Dhcpv4Client,
     socket::{
@@ -45,6 +51,7 @@ static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
 
 const HEAP_SIZE: usize = 50 * 1024; // in bytes
 const ETH_ADDR: EthernetAddress = EthernetAddress([0x00, 0x08, 0xdc, 0xab, 0xcd, 0xef]);
+
 
 #[entry]
 fn main() -> ! {
@@ -104,6 +111,14 @@ fn main() -> ! {
     // Initialize the allocator BEFORE you use it
     unsafe { ALLOCATOR.init(cortex_m_rt::heap_start() as usize, HEAP_SIZE) }
 
+    let logger_b = Box::new(Logger {
+        inner: semihosting::InterruptOk::<_>::stdout().expect("get semi stdout"),
+        level: log::LevelFilter::Debug,
+    });
+    let logger_s: &'static mut _ = Box::leak(logger_b);
+    init(logger_s).expect("logger init");
+    info!("log start");
+
     let _xs = vec![1, 2, 3];
 
     let mut i2c_3 = init::init_i2c_3(peripherals.I2C3, &mut rcc);
@@ -142,7 +157,7 @@ fn main() -> ! {
         ETH_ADDR,
     )
     .map(|device| {
-        let iface = device.into_interface(Ipv4Address::new(192, 168, 42, 69));
+        let iface = device.into_interface(Ipv4Address::UNSPECIFIED);
         let prev_ip_addr = iface.ipv4_addr().unwrap();
         (iface, prev_ip_addr)
     });
@@ -211,26 +226,24 @@ fn main() -> ! {
                 }
             }
 
-            let config = dhcp.poll(iface, &mut sockets, timestamp)
+            let config_o = dhcp.poll(iface, &mut sockets, timestamp)
                 .unwrap_or_else(|e| { println!("DHCP: {:?}", e); None});
-            let ip_addr = iface.ipv4_addr().unwrap();
-            if ip_addr != *prev_ip_addr {
+            (&config_o).as_ref().map(|c| info!("cfg r {:?}", c) );
+            if let Some(config) = config_o { if let Some(ip_addr) = config.address { if ip_addr.address() != *prev_ip_addr {
+                iface.update_ip_addrs(|ips| ips[0] = ip_addr.into());
                 println!("\nAssigned a new IPv4 address: {}", ip_addr);
-                iface.routes_mut().update(|routes_map| {
-                    routes_map
-                        .get(&IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0))
-                        .map(|default_route| {
-                            println!("Default gateway: {}", default_route.via_router);
-                        });
-                });
-                for dns_server in config.iter().flat_map(|c| c.dns_servers.iter()).filter_map(|x| x.as_ref()) {
+                if let Some(default) = config.router {
+                    let r = iface.routes_mut().add_default_ipv4_route(default);
+                    info!("route update: old: {:?} new: {}", r, default);
+                }
+                for dns_server in config.dns_servers.iter().filter_map(|x| x.as_ref()) {
                     println!("DNS servers: {}", dns_server);
                 }
 
                 // TODO delete old sockets
 
                 // add new sockets
-                let endpoint = IpEndpoint::new(ip_addr.into(), 15);
+                let endpoint = IpEndpoint::new(ip_addr.address().into(), 15);
 
                 let udp_rx_buffer =
                     UdpSocketBuffer::new(vec![UdpPacketMetadata::EMPTY; 3], vec![0u8; 256]);
@@ -246,14 +259,14 @@ fn main() -> ! {
                 example_tcp_socket.listen(endpoint).unwrap();
                 sockets.add(example_tcp_socket);
 
-                *prev_ip_addr = ip_addr;
+                *prev_ip_addr = ip_addr.address();
             }
             let mut timeout = dhcp.next_poll(timestamp);
             iface
                 .poll_delay(&sockets, timestamp)
                 .map(|sockets_timeout| timeout = sockets_timeout);
             // TODO await next interrupt
-        }
+        }}}
 
         // Initialize the SD Card on insert and deinitialize on extract.
         if sd.card_present() && !sd.card_initialized() {

@@ -14,6 +14,9 @@ use futures::{
     task::{LocalSpawn, Poll, Spawn, SpawnError, Waker, RawWaker, RawWakerVTable, Context},
 };
 
+use alloc::rc::{Weak, Rc};
+use core::cell::RefCell;
+
 pub mod mpsc;
 
 /// An executor that schedules tasks round-robin, and executes an idle_task
@@ -23,18 +26,30 @@ pub struct Executor {
     woken_tasks: Arc<Queue<TaskId>>,
     next_task_id: TaskId,
     idle_task: Option<Pin<Box<LocalFutureObj<'static, !>>>>,
+    incoming: Rc<Incoming>,
 }
 
-impl Spawn for Executor {
-    fn spawn_obj(&mut self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
+pub struct Spawner {
+    incoming: Weak<Incoming>,
+}
+
+type Incoming = RefCell<Vec<LocalFutureObj<'static, ()>>>;
+
+
+impl Spawn for Spawner {
+    fn spawn_obj(&self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
         self.spawn_local_obj(future.into())
     }
 }
 
-impl LocalSpawn for Executor {
-    fn spawn_local_obj(&mut self, future: LocalFutureObj<'static, ()>) -> Result<(), SpawnError> {
-        self.add_task(Box::pin(future));
-        Ok(())
+impl LocalSpawn for Spawner {
+    fn spawn_local_obj(&self, future: LocalFutureObj<'static, ()>) -> Result<(), SpawnError> {
+        if let Some(incoming) = self.incoming.upgrade() {
+            incoming.borrow_mut().push(future);
+            Ok(())
+        } else {
+            Err(SpawnError::shutdown())
+        }
     }
 }
 
@@ -46,15 +61,22 @@ impl Executor {
             woken_tasks: Arc::new(Queue::new()),
             next_task_id: TaskId(0),
             idle_task: None,
+            incoming: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
-    fn add_task(&mut self, task: Pin<Box<LocalFutureObj<'static, ()>>>) {
-        let id = self.next_task_id;
-        self.next_task_id += 1;
-        self.tasks.insert(id, task);
-        self.woken_tasks.push(id);
+    pub fn spawner(&self) -> Spawner {
+        Spawner {
+            incoming: Rc::downgrade(&self.incoming),
+        }
     }
+
+    //fn add_task(&mut self, task: Pin<Box<LocalFutureObj<'static, ()>>>) {
+        //let id = self.next_task_id;
+        //self.next_task_id += 1;
+        //self.tasks.insert(id, task);
+        //self.woken_tasks.push(id);
+    //}
 
     /// Sets the specified task as idle task.
     ///
@@ -70,6 +92,13 @@ impl Executor {
     /// Poll all tasks that are ready to run, until no ready tasks exist. Then poll the idle task
     /// once and return.
     pub fn run(&mut self) {
+        // process additions
+        for task in self.incoming.borrow_mut().drain(..) {
+            let id = self.next_task_id;
+            self.next_task_id += 1;
+            self.tasks.insert(id, Box::pin(task));
+            self.woken_tasks.push(id);
+        }
         match self.woken_tasks.pop() {
             PopResult::Data(task_id) => {
                 let waker = MyWaker {

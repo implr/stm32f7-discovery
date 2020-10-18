@@ -1,6 +1,7 @@
 #![feature(optin_builtin_traits)]
 #![feature(generator_trait)]
 #![feature(arbitrary_self_types)]
+#![feature(negative_impls)]
 #![no_std]
 
 pub use core::*;
@@ -38,7 +39,7 @@ pub mod future {
         fn poll(self: Pin<&mut Self>, lw: &mut Context) -> Poll<Self::Output> {
             // Safe because we're !Unpin + !Drop mapping to a ?Unpin value
             let gen = unsafe { Pin::map_unchecked_mut(self, |s| &mut s.0) };
-            set_task_waker(lw.waker(), || match gen.resume() {
+            set_task_waker(lw.waker(), || match gen.resume(()) {
                 GeneratorState::Yielded(()) => Poll::Pending,
                 GeneratorState::Complete(x) => Poll::Ready(x),
             })
